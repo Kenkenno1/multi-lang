@@ -1595,7 +1595,8 @@ Your task:
     }
 
     // ========== Full translate + refine pipeline ==========
-    async function handleUtterance(zone, text) {
+    let _utteranceGen = 0;
+    async function handleUtterance(zone, text, srcLangOverride, tgtLangOverride) {
       if (!text?.trim()) return;
       if (!state.apiKey) { toastError('請先點右上角 ⚙ 輸入 API Key'); return; }
 
@@ -1603,8 +1604,9 @@ Your task:
       setEditable(false);
       stopSpeaking();
 
-      const srcLang = getLangForZone(zone);
-      const tgtLang = getLangForZone(getOtherZone(zone));
+      const gen = ++_utteranceGen;
+      const srcLang = srcLangOverride || getLangForZone(zone);
+      const tgtLang = tgtLangOverride || getLangForZone(getOtherZone(zone));
       const speakerLabel = getSpeakerForZone(zone);
 
       const selfEls = getZoneEls(zone);
@@ -1671,7 +1673,7 @@ Your task:
         const refineSignal = controller.signal;
         refineTranslation(text, translated, srcLang, tgtLang, refineSignal)
           .then(refined => {
-            if (refineSignal.aborted) return;
+            if (refineSignal.aborted || gen !== _utteranceGen) return;
             const finalText = (refined && refined !== translated) ? refined : translated;
             if (refined && refined !== translated) {
               syncConversationPanels(zone, text, refined);
@@ -1685,11 +1687,11 @@ Your task:
               }
               el.btnPlayTw._ttsText = refined; el.btnPlayB._ttsText = refined;
             }
-            if (wantTts && !mobile && !refineSignal.aborted) speak(finalText, tgtLang);
+            if (wantTts && !mobile && !refineSignal.aborted && gen === _utteranceGen) speak(finalText, tgtLang);
           })
           .catch(e => {
             if (!isAbortError(e)) console.warn('Refine failed:', e);
-            if (wantTts && !mobile && !refineSignal.aborted) speak(translated, tgtLang);
+            if (wantTts && !mobile && !refineSignal.aborted && gen === _utteranceGen) speak(translated, tgtLang);
           });
 
       } catch (e) {
@@ -1818,6 +1820,7 @@ Your task:
     let activeRecognition = null;
     let activeMicZone = null;
     let _micDelayTimer = null;
+    let _switchTimer = null;
     let _micMaxTimer = null;
 
     if (!SpeechRecognition) {
@@ -1843,19 +1846,22 @@ Your task:
       if (_micDelayTimer) { clearTimeout(_micDelayTimer); _micDelayTimer = null; }
 
       if (activeRecognition && activeMicZone === zone) {
+        if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; }
         try { activeRecognition.stop(); } catch {}
         return;
       }
       if (activeRecognition) {
         const pending = zone;
         try { activeRecognition.stop(); } catch {}
-        _micDelayTimer = setTimeout(() => { _micDelayTimer = null; startMic(pending); }, CONFIG.MIC_SWITCH_DELAY_MS);
+        if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; }
+        _switchTimer = setTimeout(() => { _switchTimer = null; startMic(pending); }, CONFIG.MIC_SWITCH_DELAY_MS);
         return;
       }
       startMic(zone);
     }
 
     async function startMic(zone) {
+      if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; }
       if (!SpeechRecognition) return;
       if (state.busy) { toast('上一句仍在翻譯中，請稍候'); return; }
       stopSpeaking();
@@ -1877,6 +1883,7 @@ Your task:
       setEditable(false);
 
       const lang = getLangForZone(zone);
+      const tgtLangSnapshot = getLangForZone(getOtherZone(zone));
       const langCfg = LANG[lang];
       const recognition = new SpeechRecognition();
       recognition.lang = langCfg.recogLang;
@@ -1946,7 +1953,7 @@ Your task:
         if (activeRecognition !== recognition) return;
         stopMic();
         const text = (finalTranscript || lastInterim || '').trim();
-        if (text) handleUtterance(zone, text);
+        if (text) handleUtterance(zone, text, lang, tgtLangSnapshot);
       };
 
       activeRecognition = recognition;
