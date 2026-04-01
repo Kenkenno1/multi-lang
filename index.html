@@ -1105,6 +1105,9 @@
       other.translated.textContent = translated;
     }
 
+    const _ttsCache = new Map();
+    const _TTS_CACHE_MAX = 30;
+
     function clearAudioObjectUrl() {
       if (state.audioUrl) { URL.revokeObjectURL(state.audioUrl); state.audioUrl = null; }
     }
@@ -1203,22 +1206,29 @@
       const tryOpenAi = async () => {
         if (!CONFIG.USE_OPENAI_TTS || !state.apiKey) return false;
         try {
-          const res = await fetch(CONFIG.TTS_BASE, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
-            body: JSON.stringify({ model: 'tts-1', input: text, voice: CONFIG.TTS_VOICE, response_format: 'mp3' }),
-            signal: ttsAc.signal,
-          });
-          if (res.ok) {
-            const buf = await res.arrayBuffer();
-            const audio = createAudioFromBuffer(buf);
-            state.audioEl = audio;
-            audio.onended = onDone; audio.onerror = onDone;
-            await audio.play();
-            const dur = isFinite(audio.duration) ? audio.duration * 1000 : dynamicTimeout;
-            state.ttsTimeout = setTimeout(() => { if (state.speaking) stopSpeaking(); }, dur + 5000);
-            return true;
+          const cacheKey = `${text}|${CONFIG.TTS_VOICE}`;
+          let buf = _ttsCache.get(cacheKey);
+          if (!buf) {
+            const res = await fetch(CONFIG.TTS_BASE, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+              body: JSON.stringify({ model: 'tts-1', input: text, voice: CONFIG.TTS_VOICE, response_format: 'mp3' }),
+              signal: ttsAc.signal,
+            });
+            if (!res.ok) return false;
+            buf = await res.arrayBuffer();
+            _ttsCache.set(cacheKey, buf);
+            if (_ttsCache.size > _TTS_CACHE_MAX) {
+              _ttsCache.delete(_ttsCache.keys().next().value);
+            }
           }
+          const audio = createAudioFromBuffer(buf);
+          state.audioEl = audio;
+          audio.onended = onDone; audio.onerror = onDone;
+          await audio.play();
+          const dur = isFinite(audio.duration) ? audio.duration * 1000 : dynamicTimeout;
+          state.ttsTimeout = setTimeout(() => { if (state.speaking) stopSpeaking(); }, dur + 5000);
+          return true;
         } catch (e) { if (ttsAc.signal.aborted) return true; }
         return false;
       };
@@ -1358,7 +1368,8 @@
     }
 
     function stopSpeaking() {
-      const hadTtsActivity = state.speaking || !!state.audioEl || ('speechSynthesis' in window && speechSynthesis.speaking);
+      state.speakGeneration++;
+      const hadTtsActivity = state.speaking || !!state.audioEl || !!state.ttsController;
       if (state.ttsTimeout) { clearTimeout(state.ttsTimeout); state.ttsTimeout = null; }
       if (state.ttsController) { state.ttsController.abort(); state.ttsController = null; }
       if (state.audioEl) {
@@ -1843,7 +1854,7 @@ Your task:
         return;
       }
       if (!SpeechRecognition) { getZoneEls(zone).translated.focus(); return; }
-      if (_micDelayTimer) { clearTimeout(_micDelayTimer); _micDelayTimer = null; }
+      if (_micDelayTimer || _switchTimer) return;
 
       if (activeRecognition && activeMicZone === zone) {
         if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; }
@@ -1959,10 +1970,15 @@ Your task:
       activeRecognition = recognition;
       activeMicZone = zone;
 
+      zoneEls.btnMic.classList.add('mic-pending');
+      zoneEls.btnMic.textContent = '⏳ 等待中…';
+
       try {
         recognition.start();
       } catch (e) {
         activeRecognition = null; activeMicZone = null;
+        zoneEls.btnMic.classList.remove('mic-pending');
+        zoneEls.btnMic.textContent = micLabel(zone);
         if (!state.busy) setEditable(true);
         toastError('無法啟動語音辨識：' + (e.message || e));
         return;
@@ -1981,9 +1997,6 @@ Your task:
           try { recognition.stop(); } catch {}
         }
       }, CONFIG.MAX_RECORDING_MS);
-
-      zoneEls.btnMic.classList.add('mic-pending');
-      zoneEls.btnMic.textContent = '⏳ 等待中…';
     }
 
     function stopMic() {
